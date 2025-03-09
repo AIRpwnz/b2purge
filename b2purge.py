@@ -2,6 +2,7 @@ import argparse
 import b2sdk.v2 as b2
 import os
 from datetime import datetime, timedelta
+from humanize import naturalsize
 
 def delete_old_files(bucket_name, folder_path, days, dry_run):
     info = b2.InMemoryAccountInfo()
@@ -14,16 +15,28 @@ def delete_old_files(bucket_name, folder_path, days, dry_run):
     folder_path = folder_path.rstrip('/') + '/'
 
     cutoff_date = datetime.now() - timedelta(days=days)
+    
+    total_bytes = 0
+    file_count = 0
 
     for file_version, _ in bucket.ls(folder_path, recursive=True):
         file_mod_time = datetime.fromtimestamp(file_version.upload_timestamp / 1000)
 
         if file_mod_time < cutoff_date:
+            file_size = file_version.size
+            total_bytes += file_size
+            file_count += 1
+            
             if dry_run:
-                print(f"Dry run: Would delete {file_version.file_name} (last modified: {file_mod_time})")
+                print(f"Dry run: Would delete {file_version.file_name} (last modified: {file_mod_time}, size: {naturalsize(file_size)})")
             else:
-                print(f"Deleting {file_version.file_name} (last modified: {file_mod_time})")
+                print(f"Deleting {file_version.file_name} (last modified: {file_mod_time}, size: {naturalsize(file_size)})")
                 bucket.delete_file_version(file_version.id_, file_version.file_name)
+    
+    if dry_run:
+        print(f"\nDry run summary: Would delete {file_count} files ({naturalsize(total_bytes)} would be freed)")
+    else:
+        print(f"\nOperation complete: Deleted {file_count} files ({naturalsize(total_bytes)} freed)")
 
 def main():
     parser = argparse.ArgumentParser(description='Delete old files from B2 bucket.', allow_abbrev=False)
