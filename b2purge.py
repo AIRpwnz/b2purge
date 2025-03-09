@@ -13,7 +13,7 @@ def delete_old_files(bucket_name, folder_path, days, dry_run):
     b2_api.authorize_account("production", application_key_id, application_key)
 
     bucket = b2_api.get_bucket_by_name(bucket_name)
-    folder_path = folder_path.rstrip("/") + '/'
+    folder_path = folder_path.rstrip("/") + "/"
 
     cutoff_date = datetime.now() - timedelta(days=days)
 
