@@ -6,6 +6,7 @@ This script deletes old files from a specified Backblaze B2 bucket based on thei
 
 - Python 3.13
 - `b2sdk` version 2.7.0
+- `humanize` version 4.12.1
 
 ## Installation
 
@@ -15,15 +16,9 @@ This script deletes old files from a specified Backblaze B2 bucket based on thei
     cd <repository_directory>
     ```
 
-2. Create a virtual environment and activate it:
+2. Syncing the environment:
     ```sh
-    python3 -m venv .venv
-    source .venv/bin/activate
-    ```
-
-3. Install the required packages:
-    ```sh
-    pip install -r requirements.txt
+    uv sync
     ```
 
 ## Usage
@@ -41,5 +36,5 @@ To use the script, you need to set the `B2_APPLICATION_KEY_ID` and `B2_APPLICATI
 
 Perform a dry run:
 ```sh
-python3 b2purge.py super-bucket folder 5 --dry-run
+uv run python3 b2purge.py super-bucket folder 5 --dry-run
 ```
