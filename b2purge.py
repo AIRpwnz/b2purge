@@ -40,11 +40,11 @@ def delete_old_files(bucket_name, folder_path, days, dry_run):
 
     if dry_run:
         print(
-            f"\nDry run summary: Would delete {file_count} files ({naturalsize(total_bytes)} would be freed)"
+            f"\nDry run summary: Would delete {file_count} files ({naturalsize(total_bytes)} would be cleared)"
         )
     else:
         print(
-            f"\nOperation complete: Deleted {file_count} files ({naturalsize(total_bytes)} freed)"
+            f"\nOperation complete: Deleted {file_count} files ({naturalsize(total_bytes)} cleared)"
         )
 
 
