@@ -5,8 +5,8 @@ This script deletes old files from a specified Backblaze B2 bucket based on thei
 ## Requirements
 
 - Python 3.13
-- `b2sdk` version 2.7.0
-- `humanize` version 4.12.1
+- `b2sdk` version 2.10.0
+- `humanize` version 4.13.0
 
 ## Installation
 
