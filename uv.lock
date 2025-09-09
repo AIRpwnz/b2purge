@@ -22,22 +22,22 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "b2sdk", specifier = "~=2.7.0" },
-    { name = "humanize", specifier = "~=4.12.1" },
+    { name = "b2sdk", specifier = "~=2.10.0" },
+    { name = "humanize", specifier = "~=4.13.0" },
 ]
 
 [[package]]
 name = "b2sdk"
-version = "2.7.0"
+version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-types" },
     { name = "logfury" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/82/41/7f57b9246416e51200d9910bc76e20e0001e3cc4a552f557bde44de6fb78/b2sdk-2.7.0.tar.gz", hash = "sha256:efd9a5c59dcddfe626a7860caa7f420ec4b1c50b0ad30972ccebf17392795cf9", size = 203488, upload-time = "2024-12-12T18:18:14.754Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/ed/41cf8eb982f737b5f591a01446dd78db79269a24bc71142eb74fcf42c039/b2sdk-2.10.0.tar.gz", hash = "sha256:be41a07a49ed332129cf3d73262308774187b230862731e473485400a89f8dc3", size = 214259, upload-time = "2025-08-17T23:50:40.173Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/30/f2/510bfae69ae5a1935c4e62a7d4dcb6f5f20291e8a8d61cd4b44873354b7d/b2sdk-2.7.0-py3-none-any.whl", hash = "sha256:9875b73e16ab5240c8544bd79d6f23c319679b1769bc64d7f5401a8b0d489fb1", size = 281197, upload-time = "2024-12-12T18:18:13.41Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/06/ebe02bbb6ba8c7534fed07d184260bc028ca3689c48f9cdda41c0e915b0f/b2sdk-2.10.0-py3-none-any.whl", hash = "sha256:5bb587830a840b60ed148765b29870d251c6d02408712c5c3447725a1414d52d", size = 298854, upload-time = "2025-08-17T23:50:38.742Z" },
 ]
 
 [[package]]
@@ -82,11 +82,11 @@ wheels = [
 
 [[package]]
 name = "humanize"
-version = "4.12.3"
+version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/22/d1/bbc4d251187a43f69844f7fd8941426549bbe4723e8ff0a7441796b0789f/humanize-4.12.3.tar.gz", hash = "sha256:8430be3a615106fdfceb0b2c1b41c4c98c6b0fc5cc59663a5539b111dd325fb0", size = 80514, upload-time = "2025-04-30T11:51:07.98Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/98/1d/3062fcc89ee05a715c0b9bfe6490c00c576314f27ffee3a704122c6fd259/humanize-4.13.0.tar.gz", hash = "sha256:78f79e68f76f0b04d711c4e55d32bebef5be387148862cb1ef83d2b58e7935a0", size = 81884, upload-time = "2025-08-25T09:39:20.04Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a0/1e/62a2ec3104394a2975a2629eec89276ede9dbe717092f6966fcf963e1bf0/humanize-4.12.3-py3-none-any.whl", hash = "sha256:2cbf6370af06568fa6d2da77c86edb7886f3160ecd19ee1ffef07979efc597f6", size = 128487, upload-time = "2025-04-30T11:51:06.468Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/c7/316e7ca04d26695ef0635dc81683d628350810eb8e9b2299fc08ba49f366/humanize-4.13.0-py3-none-any.whl", hash = "sha256:b810820b31891813b1673e8fec7f1ed3312061eab2f26e3fa192c393d11ed25f", size = 128869, upload-time = "2025-08-25T09:39:18.54Z" },
 ]
 
 [[package]]
