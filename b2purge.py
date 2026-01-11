@@ -1,15 +1,21 @@
 import argparse
-import b2sdk.v2 as b2
 import os
 from datetime import datetime, timedelta
+from typing import cast
+
+import b2sdk.v2 as b2
 from humanize import naturalsize
 
 
 def delete_old_files(bucket_name, folder_path, days, dry_run):
-    info = b2.InMemoryAccountInfo()
+    info = cast(b2.AbstractAccountInfo, b2.InMemoryAccountInfo())
     b2_api = b2.B2Api(info)
     application_key_id = os.getenv("B2_APPLICATION_KEY_ID")
     application_key = os.getenv("B2_APPLICATION_KEY")
+    if not application_key_id or not application_key:
+        raise RuntimeError(
+            "Missing B2 credentials. Set B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY."
+        )
     b2_api.authorize_account("production", application_key_id, application_key)
 
     bucket = b2_api.get_bucket_by_name(bucket_name)
