@@ -22,7 +22,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "b2sdk", specifier = "~=2.10.0" },
+    { name = "b2sdk", specifier = "~=2.10.2" },
     { name = "humanize", specifier = "~=4.13.0" },
 ]
 
