@@ -1,5 +1,7 @@
 import argparse
 import os
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -8,15 +10,34 @@ from typing import cast
 import b2sdk.v2 as b2
 from humanize import naturalsize
 
+# Keep a conservative default to reduce API rate-limit risk.
 DEFAULT_WORKERS = max(1, min(8, (os.cpu_count() or 1) * 2))
+DEFAULT_MAX_RETRIES = 5
+RETRY_BASE_DELAY = 0.5
+RETRY_MAX_DELAY = 8.0
 
 
 @dataclass(frozen=True)
 class FileCandidate:
+    # Immutable snapshot so threaded deletes don't share mutable state.
     file_id: str
     file_name: str
     file_size: int
     upload_timestamp_ms: int
+
+
+def is_rate_limit_error(exc):
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
+    if isinstance(code, str) and code.lower() in {
+        "too_many_requests",
+        "rate_limit_exceeded",
+    }:
+        return True
+    message = str(exc).lower()
+    return "too many requests" in message or "rate limit" in message or "429" in message
 
 
 def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
@@ -33,11 +54,13 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
     bucket = b2_api.get_bucket_by_name(bucket_name)
     folder_path = folder_path.rstrip("/") + "/"
 
+    # Compare raw timestamps to avoid per-file datetime conversions.
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
     candidates = []
     for file_version, _ in bucket.ls(folder_path, recursive=True):
         if file_version.upload_timestamp < cutoff_ms:
+            # Collect once so dry-run and delete paths share the same candidate set.
             candidates.append(
                 FileCandidate(
                     file_id=file_version.id_,
@@ -48,6 +71,7 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
             )
 
     if dry_run:
+        # Dry-run is intentionally sequential to keep output deterministic.
         total_bytes = 0
         for candidate in candidates:
             file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
@@ -61,14 +85,24 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
         return
 
     def delete_candidate(candidate):
-        bucket.delete_file_version(candidate.file_id, candidate.file_name)
-        return candidate
+        # Delete a specific version; B2 identifies versions by (id, name).
+        for attempt in range(DEFAULT_MAX_RETRIES + 1):
+            try:
+                bucket.delete_file_version(candidate.file_id, candidate.file_name)
+                return candidate
+            except Exception as exc:
+                if not is_rate_limit_error(exc) or attempt == DEFAULT_MAX_RETRIES:
+                    raise
+                delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2**attempt))
+                delay *= 0.8 + random.random() * 0.4
+                time.sleep(delay)
 
     deleted_bytes = 0
     deleted_count = 0
     failed = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Schedule deletes in parallel with bounded concurrency.
         future_to_candidate = {
             executor.submit(delete_candidate, candidate): candidate
             for candidate in candidates
