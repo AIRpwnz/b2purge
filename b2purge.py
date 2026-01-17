@@ -73,6 +73,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.days <= 0:
+        parser.error("days must be a positive integer")
+
     delete_old_files(args.bucket_name, args.folder_path, args.days, args.dry_run)
 
 
