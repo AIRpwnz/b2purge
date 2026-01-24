@@ -1,10 +1,12 @@
 import argparse
+import logging
 import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import cast
 
 import b2sdk.v2 as b2
@@ -15,6 +17,31 @@ DEFAULT_WORKERS = max(1, min(8, (os.cpu_count() or 1) * 2))
 DEFAULT_MAX_RETRIES = 5
 RETRY_BASE_DELAY = 0.5
 RETRY_MAX_DELAY = 8.0
+
+
+def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger:
+    logger = logging.getLogger("b2purge")
+    logger.setLevel(getattr(logging, log_level))
+    logger.handlers.clear()
+
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    if log_file:
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        )
+        file_formatter = logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+
+    return logger
 
 
 @dataclass(frozen=True)
@@ -40,7 +67,7 @@ def is_rate_limit_error(exc):
     return "too many requests" in message or "rate limit" in message or "429" in message
 
 
-def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
+def delete_old_files(bucket_name, folder_path, days, dry_run, workers, logger):
     info = cast(b2.AbstractAccountInfo, b2.InMemoryAccountInfo())
     b2_api = b2.B2Api(info)
     application_key_id = os.getenv("B2_APPLICATION_KEY_ID")
@@ -76,11 +103,11 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
         for candidate in candidates:
             file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
             total_bytes += candidate.file_size
-            print(
+            logger.info(
                 f"Dry run: Would delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
             )
-        print(
-            f"\nDry run summary: Would delete {len(candidates)} files ({naturalsize(total_bytes)} would be cleared)"
+        logger.info(
+            f"Dry run summary: Would delete {len(candidates)} files ({naturalsize(total_bytes)} would be cleared)"
         )
         return
 
@@ -95,6 +122,9 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
                     raise
                 delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2**attempt))
                 delay *= 0.8 + random.random() * 0.4
+                logger.warning(
+                    f"Rate limit hit for {candidate.file_name}, retrying in {delay:.2f}s (attempt {attempt + 1}/{DEFAULT_MAX_RETRIES})"
+                )
                 time.sleep(delay)
 
     deleted_bytes = 0
@@ -114,24 +144,24 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers):
                 future.result()
             except Exception as exc:
                 failed.append(candidate)
-                print(
+                logger.error(
                     f"Failed to delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)}): {exc}"
                 )
             else:
                 deleted_bytes += candidate.file_size
                 deleted_count += 1
-                print(
+                logger.info(
                     f"Deleted {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
                 )
 
     if failed:
         failed_bytes = sum(candidate.file_size for candidate in failed)
-        print(
-            f"\nOperation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared), {len(failed)} failed ({naturalsize(failed_bytes)} not cleared)"
+        logger.warning(
+            f"Operation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared), {len(failed)} failed ({naturalsize(failed_bytes)} not cleared)"
         )
     else:
-        print(
-            f"\nOperation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared)"
+        logger.info(
+            f"Operation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared)"
         )
 
 
@@ -157,6 +187,17 @@ def main():
         default=DEFAULT_WORKERS,
         help="Number of concurrent delete workers (ignored for dry run)",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Path to log file (optional, logs to console if not specified)",
+    )
 
     args = parser.parse_args()
 
@@ -166,12 +207,15 @@ def main():
     if args.workers <= 0:
         parser.error("workers must be a positive integer")
 
+    logger = setup_logging(args.log_level, args.log_file)
+
     delete_old_files(
         args.bucket_name,
         args.folder_path,
         args.days,
         args.dry_run,
         args.workers,
+        logger,
     )
 
 
