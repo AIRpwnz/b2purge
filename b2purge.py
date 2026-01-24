@@ -68,7 +68,7 @@ def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger
 
 
 @dataclass(frozen=True)
-class FileCandidate:
+class OldFile:
     # Immutable snapshot so threaded deletes don't share mutable state.
     file_id: str
     file_name: str
@@ -91,12 +91,12 @@ def is_rate_limit_error(exc):
 
 
 def batch_generator(bucket, folder_path, cutoff_ms, batch_size):
-    """Yields batches of FileCandidate objects to limit memory usage."""
+    """Yields batches of OldFile objects to limit memory usage."""
     batch = []
     for file_version, _ in bucket.ls(folder_path, recursive=True):
         if file_version.upload_timestamp < cutoff_ms:
             batch.append(
-                FileCandidate(
+                OldFile(
                     file_id=file_version.id_,
                     file_name=file_version.file_name,
                     file_size=file_version.size,
@@ -128,44 +128,44 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_siz
 
     if dry_run:
         total_bytes = 0
-        total_candidates = 0
+        total_old_files = 0
         total_scanned = 0
         batch_num = 0
         
         for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
             batch_num += 1
-            batch_candidates = len(batch)
-            total_candidates += batch_candidates
+            batch_old_files = len(batch)
+            total_old_files += batch_old_files
             total_scanned += batch_size
             
-            for candidate in batch:
-                file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
-                total_bytes += candidate.file_size
+            for old_file in batch:
+                file_mod_time = datetime.fromtimestamp(old_file.upload_timestamp_ms / 1000)
+                total_bytes += old_file.file_size
                 logger.info(
-                    f"Dry run: Would delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
+                    f"Dry run: Would delete {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)})"
                 )
             
             logger.info(
-                f"Batch {batch_num} complete: {batch_candidates} candidates in this batch, {total_candidates} total candidates found"
+                f"Batch {batch_num} complete: {batch_old_files} old files in this batch, {total_old_files} total old files found"
             )
         
         logger.info(
-            f"Dry run summary: Would delete {total_candidates} files ({naturalsize(total_bytes)} would be cleared)"
+            f"Dry run summary: Would delete {total_old_files} files ({naturalsize(total_bytes)} would be cleared)"
         )
         return
 
-    def delete_candidate(candidate):
+    def delete_old_file(old_file):
         for attempt in range(DEFAULT_MAX_RETRIES + 1):
             try:
-                bucket.delete_file_version(candidate.file_id, candidate.file_name)
-                return candidate
+                bucket.delete_file_version(old_file.file_id, old_file.file_name)
+                return old_file
             except Exception as exc:
                 if not is_rate_limit_error(exc) or attempt == DEFAULT_MAX_RETRIES:
                     raise
                 delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2**attempt))
                 delay *= 0.8 + random.random() * 0.4
                 logger.warning(
-                    f"Rate limit hit for {candidate.file_name}, retrying in {delay:.2f}s (attempt {attempt + 1}/{DEFAULT_MAX_RETRIES})"
+                    f"Rate limit hit for {old_file.file_name}, retrying in {delay:.2f}s (attempt {attempt + 1}/{DEFAULT_MAX_RETRIES})"
                 )
                 time.sleep(delay)
 
@@ -179,26 +179,26 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_siz
         batch_num += 1
         
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_candidate = {
-                executor.submit(delete_candidate, candidate): candidate
-                for candidate in batch
+            future_to_old_file = {
+                executor.submit(delete_old_file, old_file): old_file
+                for old_file in batch
             }
-            for future in as_completed(future_to_candidate):
-                candidate = future_to_candidate[future]
-                file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
+            for future in as_completed(future_to_old_file):
+                old_file = future_to_old_file[future]
+                file_mod_time = datetime.fromtimestamp(old_file.upload_timestamp_ms / 1000)
                 try:
                     future.result()
                 except Exception as exc:
                     failed_count += 1
-                    failed_bytes += candidate.file_size
+                    failed_bytes += old_file.file_size
                     logger.error(
-                        f"Failed to delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)}): {exc}"
+                        f"Failed to delete {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)}): {exc}"
                     )
                 else:
-                    deleted_bytes += candidate.file_size
+                    deleted_bytes += old_file.file_size
                     deleted_count += 1
                     logger.info(
-                        f"Deleted {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
+                        f"Deleted {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)})"
                     )
         
         logger.info(
