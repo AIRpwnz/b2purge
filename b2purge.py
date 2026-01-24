@@ -19,6 +19,28 @@ DEFAULT_MAX_RETRIES = 5
 RETRY_BASE_DELAY = 0.5
 RETRY_MAX_DELAY = 8.0
 
+RESET = "\033[0m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+GREEN = "\033[92m"
+BLUE = "\033[94m"
+GRAY = "\033[90m"
+
+
+class ColoredFormatter(logging.Formatter):
+    LEVEL_COLORS = {
+        "DEBUG": GRAY,
+        "INFO": GREEN,
+        "WARNING": YELLOW,
+        "ERROR": RED,
+    }
+
+    def format(self, record):
+        levelname = record.levelname
+        if levelname in self.LEVEL_COLORS:
+            record.levelname = f"{self.LEVEL_COLORS[levelname]}{levelname}{RESET}"
+        return super().format(record)
+
 
 def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger:
     logger = logging.getLogger("b2purge")
@@ -26,7 +48,7 @@ def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger
     logger.handlers.clear()
 
     console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter(
+    console_formatter = ColoredFormatter(
         "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
     console_handler.setFormatter(console_formatter)
