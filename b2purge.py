@@ -110,7 +110,9 @@ def batch_generator(bucket, folder_path, cutoff_ms, batch_size):
         yield batch
 
 
-def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_size, logger):
+def delete_old_files(
+    bucket_name, folder_path, days, dry_run, workers, batch_size, logger
+):
     info = cast(b2.AbstractAccountInfo, b2.InMemoryAccountInfo())
     b2_api = b2.B2Api(info)
     application_key_id = os.getenv("B2_APPLICATION_KEY_ID")
@@ -131,24 +133,26 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_siz
         total_old_files = 0
         total_scanned = 0
         batch_num = 0
-        
+
         for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
             batch_num += 1
             batch_old_files = len(batch)
             total_old_files += batch_old_files
             total_scanned += batch_size
-            
+
             for old_file in batch:
-                file_mod_time = datetime.fromtimestamp(old_file.upload_timestamp_ms / 1000)
+                file_mod_time = datetime.fromtimestamp(
+                    old_file.upload_timestamp_ms / 1000
+                )
                 total_bytes += old_file.file_size
                 logger.info(
                     f"Dry run: Would delete {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)})"
                 )
-            
+
             logger.info(
                 f"Batch {batch_num} complete: {batch_old_files} old files in this batch, {total_old_files} total old files found"
             )
-        
+
         logger.info(
             f"Dry run summary: Would delete {total_old_files} files ({naturalsize(total_bytes)} would be cleared)"
         )
@@ -177,7 +181,7 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_siz
 
     for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
         batch_num += 1
-        
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_old_file = {
                 executor.submit(delete_old_file, old_file): old_file
@@ -185,7 +189,9 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_siz
             }
             for future in as_completed(future_to_old_file):
                 old_file = future_to_old_file[future]
-                file_mod_time = datetime.fromtimestamp(old_file.upload_timestamp_ms / 1000)
+                file_mod_time = datetime.fromtimestamp(
+                    old_file.upload_timestamp_ms / 1000
+                )
                 try:
                     future.result()
                 except Exception as exc:
@@ -200,7 +206,7 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_siz
                     logger.info(
                         f"Deleted {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)})"
                     )
-        
+
         logger.info(
             f"Batch {batch_num} complete: {deleted_count} total deleted, {failed_count} total failed"
         )
