@@ -14,6 +14,7 @@ from humanize import naturalsize
 
 # Keep a conservative default to reduce API rate-limit risk.
 DEFAULT_WORKERS = max(1, min(8, (os.cpu_count() or 1) * 2))
+DEFAULT_BATCH_SIZE = 10000
 DEFAULT_MAX_RETRIES = 5
 RETRY_BASE_DELAY = 0.5
 RETRY_MAX_DELAY = 8.0
@@ -67,7 +68,27 @@ def is_rate_limit_error(exc):
     return "too many requests" in message or "rate limit" in message or "429" in message
 
 
-def delete_old_files(bucket_name, folder_path, days, dry_run, workers, logger):
+def batch_generator(bucket, folder_path, cutoff_ms, batch_size):
+    """Yields batches of FileCandidate objects to limit memory usage."""
+    batch = []
+    for file_version, _ in bucket.ls(folder_path, recursive=True):
+        if file_version.upload_timestamp < cutoff_ms:
+            batch.append(
+                FileCandidate(
+                    file_id=file_version.id_,
+                    file_name=file_version.file_name,
+                    file_size=file_version.size,
+                    upload_timestamp_ms=file_version.upload_timestamp,
+                )
+            )
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
+
+
+def delete_old_files(bucket_name, folder_path, days, dry_run, workers, batch_size, logger):
     info = cast(b2.AbstractAccountInfo, b2.InMemoryAccountInfo())
     b2_api = b2.B2Api(info)
     application_key_id = os.getenv("B2_APPLICATION_KEY_ID")
@@ -81,38 +102,37 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, logger):
     bucket = b2_api.get_bucket_by_name(bucket_name)
     folder_path = folder_path.rstrip("/") + "/"
 
-    # Compare raw timestamps to avoid per-file datetime conversions.
     cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
-    candidates = []
-    for file_version, _ in bucket.ls(folder_path, recursive=True):
-        if file_version.upload_timestamp < cutoff_ms:
-            # Collect once so dry-run and delete paths share the same candidate set.
-            candidates.append(
-                FileCandidate(
-                    file_id=file_version.id_,
-                    file_name=file_version.file_name,
-                    file_size=file_version.size,
-                    upload_timestamp_ms=file_version.upload_timestamp,
-                )
-            )
-
     if dry_run:
-        # Dry-run is intentionally sequential to keep output deterministic.
         total_bytes = 0
-        for candidate in candidates:
-            file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
-            total_bytes += candidate.file_size
+        total_candidates = 0
+        total_scanned = 0
+        batch_num = 0
+        
+        for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
+            batch_num += 1
+            batch_candidates = len(batch)
+            total_candidates += batch_candidates
+            total_scanned += batch_size
+            
+            for candidate in batch:
+                file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
+                total_bytes += candidate.file_size
+                logger.info(
+                    f"Dry run: Would delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
+                )
+            
             logger.info(
-                f"Dry run: Would delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
+                f"Batch {batch_num} complete: {batch_candidates} candidates in this batch, {total_candidates} total candidates found"
             )
+        
         logger.info(
-            f"Dry run summary: Would delete {len(candidates)} files ({naturalsize(total_bytes)} would be cleared)"
+            f"Dry run summary: Would delete {total_candidates} files ({naturalsize(total_bytes)} would be cleared)"
         )
         return
 
     def delete_candidate(candidate):
-        # Delete a specific version; B2 identifies versions by (id, name).
         for attempt in range(DEFAULT_MAX_RETRIES + 1):
             try:
                 bucket.delete_file_version(candidate.file_id, candidate.file_name)
@@ -129,35 +149,43 @@ def delete_old_files(bucket_name, folder_path, days, dry_run, workers, logger):
 
     deleted_bytes = 0
     deleted_count = 0
-    failed = []
+    failed_count = 0
+    failed_bytes = 0
+    batch_num = 0
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        # Schedule deletes in parallel with bounded concurrency.
-        future_to_candidate = {
-            executor.submit(delete_candidate, candidate): candidate
-            for candidate in candidates
-        }
-        for future in as_completed(future_to_candidate):
-            candidate = future_to_candidate[future]
-            file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
-            try:
-                future.result()
-            except Exception as exc:
-                failed.append(candidate)
-                logger.error(
-                    f"Failed to delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)}): {exc}"
-                )
-            else:
-                deleted_bytes += candidate.file_size
-                deleted_count += 1
-                logger.info(
-                    f"Deleted {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
-                )
+    for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
+        batch_num += 1
+        
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_candidate = {
+                executor.submit(delete_candidate, candidate): candidate
+                for candidate in batch
+            }
+            for future in as_completed(future_to_candidate):
+                candidate = future_to_candidate[future]
+                file_mod_time = datetime.fromtimestamp(candidate.upload_timestamp_ms / 1000)
+                try:
+                    future.result()
+                except Exception as exc:
+                    failed_count += 1
+                    failed_bytes += candidate.file_size
+                    logger.error(
+                        f"Failed to delete {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)}): {exc}"
+                    )
+                else:
+                    deleted_bytes += candidate.file_size
+                    deleted_count += 1
+                    logger.info(
+                        f"Deleted {candidate.file_name} (last modified: {file_mod_time}, size: {naturalsize(candidate.file_size)})"
+                    )
+        
+        logger.info(
+            f"Batch {batch_num} complete: {deleted_count} total deleted, {failed_count} total failed"
+        )
 
-    if failed:
-        failed_bytes = sum(candidate.file_size for candidate in failed)
+    if failed_count > 0:
         logger.warning(
-            f"Operation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared), {len(failed)} failed ({naturalsize(failed_bytes)} not cleared)"
+            f"Operation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared), {failed_count} failed ({naturalsize(failed_bytes)} not cleared)"
         )
     else:
         logger.info(
@@ -188,6 +216,12 @@ def main():
         help="Number of concurrent delete workers (ignored for dry run)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Number of files to process in each batch (affects memory usage)",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -207,6 +241,9 @@ def main():
     if args.workers <= 0:
         parser.error("workers must be a positive integer")
 
+    if args.batch_size <= 0:
+        parser.error("batch-size must be a positive integer")
+
     logger = setup_logging(args.log_level, args.log_file)
 
     delete_old_files(
@@ -215,6 +252,7 @@ def main():
         args.days,
         args.dry_run,
         args.workers,
+        args.batch_size,
         logger,
     )
 
