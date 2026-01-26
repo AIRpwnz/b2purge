@@ -1,13 +1,118 @@
 import argparse
+import logging
 import os
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import cast
 
 import b2sdk.v2 as b2
 from humanize import naturalsize
 
+# Keep a conservative default to reduce API rate-limit risk.
+DEFAULT_WORKERS = max(1, min(8, (os.cpu_count() or 1) * 2))
+DEFAULT_BATCH_SIZE = 10000
+DEFAULT_MAX_RETRIES = 5
+RETRY_BASE_DELAY = 0.5
+RETRY_MAX_DELAY = 8.0
 
-def delete_old_files(bucket_name, folder_path, days, dry_run):
+RESET = "\033[0m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+GREEN = "\033[92m"
+BLUE = "\033[94m"
+GRAY = "\033[90m"
+
+
+class ColoredFormatter(logging.Formatter):
+    LEVEL_COLORS = {
+        "DEBUG": GRAY,
+        "INFO": GREEN,
+        "WARNING": YELLOW,
+        "ERROR": RED,
+    }
+
+    def format(self, record):
+        levelname = record.levelname
+        if levelname in self.LEVEL_COLORS:
+            record.levelname = f"{self.LEVEL_COLORS[levelname]}{levelname}{RESET}"
+        return super().format(record)
+
+
+def setup_logging(log_level: str, log_file: str | None = None) -> logging.Logger:
+    logger = logging.getLogger("b2purge")
+    logger.setLevel(getattr(logging, log_level))
+    logger.handlers.clear()
+
+    console_handler = logging.StreamHandler()
+    console_formatter = ColoredFormatter(
+        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    if log_file:
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        )
+        file_formatter = logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+@dataclass(frozen=True)
+class OldFile:
+    # Immutable snapshot so threaded deletes don't share mutable state.
+    file_id: str
+    file_name: str
+    file_size: int
+    upload_timestamp_ms: int
+
+
+def is_rate_limit_error(exc):
+    status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
+    if isinstance(code, str) and code.lower() in {
+        "too_many_requests",
+        "rate_limit_exceeded",
+    }:
+        return True
+    message = str(exc).lower()
+    return "too many requests" in message or "rate limit" in message or "429" in message
+
+
+def batch_generator(bucket, folder_path, cutoff_ms, batch_size):
+    """Yields batches of OldFile objects to limit memory usage."""
+    batch = []
+    for file_version, _ in bucket.ls(folder_path, recursive=True):
+        if file_version.upload_timestamp < cutoff_ms:
+            batch.append(
+                OldFile(
+                    file_id=file_version.id_,
+                    file_name=file_version.file_name,
+                    file_size=file_version.size,
+                    upload_timestamp_ms=file_version.upload_timestamp,
+                )
+            )
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
+
+
+def delete_old_files(
+    bucket_name, folder_path, days, dry_run, workers, batch_size, logger
+):
     info = cast(b2.AbstractAccountInfo, b2.InMemoryAccountInfo())
     b2_api = b2.B2Api(info)
     application_key_id = os.getenv("B2_APPLICATION_KEY_ID")
@@ -21,36 +126,98 @@ def delete_old_files(bucket_name, folder_path, days, dry_run):
     bucket = b2_api.get_bucket_by_name(bucket_name)
     folder_path = folder_path.rstrip("/") + "/"
 
-    cutoff_date = datetime.now() - timedelta(days=days)
-
-    total_bytes = 0
-    file_count = 0
-
-    for file_version, _ in bucket.ls(folder_path, recursive=True):
-        file_mod_time = datetime.fromtimestamp(file_version.upload_timestamp / 1000)
-
-        if file_mod_time < cutoff_date:
-            file_size = file_version.size
-            total_bytes += file_size
-            file_count += 1
-
-            if dry_run:
-                print(
-                    f"Dry run: Would delete {file_version.file_name} (last modified: {file_mod_time}, size: {naturalsize(file_size)})"
-                )
-            else:
-                print(
-                    f"Deleting {file_version.file_name} (last modified: {file_mod_time}, size: {naturalsize(file_size)})"
-                )
-                bucket.delete_file_version(file_version.id_, file_version.file_name)
+    cutoff_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
 
     if dry_run:
-        print(
-            f"\nDry run summary: Would delete {file_count} files ({naturalsize(total_bytes)} would be cleared)"
+        total_bytes = 0
+        total_old_files = 0
+        total_scanned = 0
+        batch_num = 0
+
+        for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
+            batch_num += 1
+            batch_old_files = len(batch)
+            total_old_files += batch_old_files
+            total_scanned += batch_size
+
+            for old_file in batch:
+                file_mod_time = datetime.fromtimestamp(
+                    old_file.upload_timestamp_ms / 1000
+                )
+                total_bytes += old_file.file_size
+                logger.info(
+                    f"Dry run: Would delete {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)})"
+                )
+
+            logger.info(
+                f"Batch {batch_num} complete: {batch_old_files} old files in this batch, {total_old_files} total old files found"
+            )
+
+        logger.info(
+            f"Dry run summary: Would delete {total_old_files} files ({naturalsize(total_bytes)} would be cleared)"
+        )
+        return
+
+    def delete_old_file(old_file):
+        for attempt in range(DEFAULT_MAX_RETRIES + 1):
+            try:
+                bucket.delete_file_version(old_file.file_id, old_file.file_name)
+                return old_file
+            except Exception as exc:
+                if not is_rate_limit_error(exc) or attempt == DEFAULT_MAX_RETRIES:
+                    raise
+                delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2**attempt))
+                delay *= 0.8 + random.random() * 0.4
+                logger.warning(
+                    f"Rate limit hit for {old_file.file_name}, retrying in {delay:.2f}s (attempt {attempt + 1}/{DEFAULT_MAX_RETRIES})"
+                )
+                time.sleep(delay)
+
+    deleted_bytes = 0
+    deleted_count = 0
+    failed_count = 0
+    failed_bytes = 0
+    batch_num = 0
+
+    for batch in batch_generator(bucket, folder_path, cutoff_ms, batch_size):
+        batch_num += 1
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_old_file = {
+                executor.submit(delete_old_file, old_file): old_file
+                for old_file in batch
+            }
+            for future in as_completed(future_to_old_file):
+                old_file = future_to_old_file[future]
+                file_mod_time = datetime.fromtimestamp(
+                    old_file.upload_timestamp_ms / 1000
+                )
+                try:
+                    future.result()
+                except Exception as exc:
+                    failed_count += 1
+                    failed_bytes += old_file.file_size
+                    logger.error(
+                        f"Failed to delete {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)}): {exc}"
+                    )
+                else:
+                    deleted_bytes += old_file.file_size
+                    deleted_count += 1
+                    logger.info(
+                        f"Deleted {old_file.file_name} (last modified: {file_mod_time}, size: {naturalsize(old_file.file_size)})"
+                    )
+
+        logger.info(
+            f"Batch {batch_num} complete: {deleted_count} total deleted, {failed_count} total failed"
+        )
+
+    if failed_count > 0:
+        logger.warning(
+            f"Operation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared), {failed_count} failed ({naturalsize(failed_bytes)} not cleared)"
         )
     else:
-        print(
-            f"\nOperation complete: Deleted {file_count} files ({naturalsize(total_bytes)} cleared)"
+        logger.info(
+            f"Operation complete: Deleted {deleted_count} files ({naturalsize(deleted_bytes)} cleared)"
         )
 
 
@@ -70,13 +237,52 @@ def main():
         action="store_true",
         help="Perform a dry run without deleting files",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help="Number of concurrent delete workers (ignored for dry run)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Number of files to process in each batch (affects memory usage)",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Logging level (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Path to log file (optional, logs to console if not specified)",
+    )
 
     args = parser.parse_args()
 
     if args.days <= 0:
         parser.error("days must be a positive integer")
 
-    delete_old_files(args.bucket_name, args.folder_path, args.days, args.dry_run)
+    if args.workers <= 0:
+        parser.error("workers must be a positive integer")
+
+    if args.batch_size <= 0:
+        parser.error("batch-size must be a positive integer")
+
+    logger = setup_logging(args.log_level, args.log_file)
+
+    delete_old_files(
+        args.bucket_name,
+        args.folder_path,
+        args.days,
+        args.dry_run,
+        args.workers,
+        args.batch_size,
+        logger,
+    )
 
 
 if __name__ == "__main__":
